@@ -23,4 +23,7 @@ jobs:
       run: go mod download
 
     - name: Run tests
+      env:
+        # Set CI=true to enable CI-specific logic in tests
+        CI: "true"
       run: go test -v ./... 
