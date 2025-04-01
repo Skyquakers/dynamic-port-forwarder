@@ -2,8 +2,12 @@ package main_test
 
 import (
 	"crypto/tls"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -110,40 +114,60 @@ func TestServerSetup(t *testing.T) {
 	certFile.Close()
 	keyFile.Close()
 
-	// Set up test environment
+	// Set up test environment with port range
 	os.Setenv("NODE_IPS", "127.0.0.1")
 	os.Setenv("MIN_PORT", "50100")
 	os.Setenv("MAX_PORT", "50105")
 	os.Setenv("CERT_FILE", certFile.Name())
 	os.Setenv("KEY_FILE", keyFile.Name())
 
-	// Create mock HTTP server on each target port
+	// Create mock HTTP servers for each port to simulate backend services
 	var mockServers []*http.Server
 	var wg sync.WaitGroup
 
+	// Map to store expected responses from each mock server
+	expectedResponses := make(map[int]string)
+
 	for port := 50100; port <= 50105; port++ {
+		// Use unique response for each port to verify correct routing
+		portText := fmt.Sprintf("%d", port)
+		responseText := fmt.Sprintf("Response from backend server on port %s", portText)
+		expectedResponses[port] = responseText
+
+		// Create server with port-specific handler (using closure to capture port)
+		currentPort := port // Important: Capture the port in this iteration
 		server := &http.Server{
-			Addr: "127.0.0.1:50100",
+			Addr: fmt.Sprintf("127.0.0.1:%d", currentPort),
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Write([]byte("OK"))
+				w.Write([]byte(expectedResponses[currentPort]))
 			}),
 		}
 		mockServers = append(mockServers, server)
 
 		wg.Add(1)
-		go func(s *http.Server) {
+		go func(s *http.Server, p int) {
 			defer wg.Done()
-			s.ListenAndServe()
-		}(server)
+			t.Logf("Starting mock backend on port %d", p)
+			if err := s.ListenAndServe(); err != http.ErrServerClosed {
+				t.Logf("Mock server on port %d error: %v", p, err)
+			}
+		}(server, currentPort)
 	}
 
-	// Start proxy in a goroutine
+	// Give mock servers time to start
+	time.Sleep(500 * time.Millisecond)
+
+	// Start proxy in a goroutine and channel for signaling completion
+	done := make(chan struct{})
+	var proxyError error
+
 	go func() {
 		// Load certificate manager
 		certManager := cert.NewManager(certFile.Name(), keyFile.Name())
 		tlsConfig, err := certManager.GetTLSConfig()
 		if err != nil {
-			t.Errorf("Failed to load TLS config: %v", err)
+			proxyError = fmt.Errorf("failed to load TLS config: %v", err)
+			close(done)
 			return
 		}
 
@@ -151,40 +175,98 @@ func TestServerSetup(t *testing.T) {
 		p := proxy.NewProxy([]string{"127.0.0.1"}, tlsConfig)
 
 		// Start servers for port range
+		var startupErrors []string
 		for port := 50100; port <= 50105; port++ {
-			p.StartServer(port)
+			if err := p.StartServer(port); err != nil {
+				startupErrors = append(startupErrors, fmt.Sprintf("port %d: %v", port, err))
+			}
 		}
 
-		// Wait for a bit to keep servers running
-		time.Sleep(2 * time.Second)
+		if len(startupErrors) > 0 {
+			proxyError = fmt.Errorf("failed to start servers: %s", strings.Join(startupErrors, "; "))
+			close(done)
+			return
+		}
 
-		// Stop all servers
+		// If we get here, startup was successful
+		close(done)
+
+		// Keep proxy running while tests execute
+		time.Sleep(5 * time.Second)
+
+		// Clean up - stop all servers
 		p.StopAll()
 	}()
 
-	// Give servers time to start
+	// Wait for proxy to start or fail
+	<-done
+	if proxyError != nil {
+		t.Fatalf("Failed to start proxy: %v", proxyError)
+	}
+
+	// Give the proxy a moment to bind to all ports
 	time.Sleep(500 * time.Millisecond)
 
-	// Test HTTPS connection to proxy
+	// Test HTTPS connection to proxy for each port in the range
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true,
 			},
 		},
+		Timeout: 2 * time.Second,
 	}
 
-	// Try a request - should fail since we're not actually running a full proxy in this test
-	// This is just to validate the setup code runs properly
-	_, err = client.Get("https://localhost:50100")
-	if err == nil {
-		t.Log("HTTPS connection succeeded, which is unexpected in this test environment")
-	} else {
-		t.Logf("HTTPS connection failed as expected: %v", err)
+	// Check that each port is listening and correctly proxying requests
+	successCount := 0
+	for port := 50100; port <= 50105; port++ {
+		t.Logf("Testing port %d", port)
+		url := fmt.Sprintf("https://localhost:%d", port)
+
+		// Try several times in case there's a timing issue
+		var resp *http.Response
+		var err error
+		for attempts := 0; attempts < 3; attempts++ {
+			resp, err = client.Get(url)
+			if err == nil {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+
+		if err != nil {
+			t.Errorf("Failed to connect to proxy on port %d: %v", port, err)
+			continue
+		}
+
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Errorf("Error reading response from port %d: %v", port, err)
+			continue
+		}
+
+		// Verify response matches expected for this port
+		expected := expectedResponses[port]
+		received := string(body)
+
+		if received != expected {
+			t.Errorf("Port %d: expected response %q, got %q", port, expected, received)
+		} else {
+			t.Logf("Port %d validated successfully", port)
+			successCount++
+		}
+	}
+
+	// Report overall test success
+	t.Logf("%d of %d ports successfully tested", successCount, 6)
+	if successCount == 0 {
+		t.Errorf("No ports were successfully tested")
 	}
 
 	// Shutdown mock servers
-	for _, server := range mockServers {
+	for i, server := range mockServers {
+		t.Logf("Shutting down mock server %d", i)
 		server.Close()
 	}
 
@@ -210,41 +292,148 @@ func TestConfigValidation(t *testing.T) {
 		os.Setenv("KEY_FILE", oldKeyFile)
 	}()
 
-	// Configure invalid port range
-	os.Setenv("NODE_IPS", "127.0.0.1")
-	os.Setenv("MIN_PORT", "9000")
-	os.Setenv("MAX_PORT", "8000")
-	os.Setenv("CERT_FILE", "/tmp/cert.pem")
-	os.Setenv("KEY_FILE", "/tmp/key.pem")
+	// Create temp files for certificate and key
+	createTempCertFiles := func(t *testing.T) (certPath, keyPath string) {
+		tmpCert, err := os.CreateTemp("", "cert-*.pem")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tmpCert.WriteString(validCertPEM); err != nil {
+			t.Fatal(err)
+		}
+		tmpCert.Close()
 
-	// Create temp files so we don't fail on the file check
-	tmpCert, err := os.Create("/tmp/cert.pem")
-	if err != nil {
-		t.Fatal(err)
+		tmpKey, err := os.CreateTemp("", "key-*.pem")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tmpKey.WriteString(validKeyPEM); err != nil {
+			t.Fatal(err)
+		}
+		tmpKey.Close()
+
+		return tmpCert.Name(), tmpKey.Name()
 	}
-	defer os.Remove("/tmp/cert.pem")
 
-	if _, err := tmpCert.WriteString(validCertPEM); err != nil {
-		t.Fatal(err)
+	// Helper to clean up temp files
+	cleanupFiles := func(paths ...string) {
+		for _, path := range paths {
+			os.Remove(path)
+		}
 	}
-	tmpCert.Close()
 
-	tmpKey, err := os.Create("/tmp/key.pem")
-	if err != nil {
-		t.Fatal(err)
+	// Test cases
+	testCases := []struct {
+		name          string
+		nodeIPs       string
+		minPort       string
+		maxPort       string
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name:          "Invalid port range (min > max)",
+			nodeIPs:       "127.0.0.1",
+			minPort:       "9000",
+			maxPort:       "8000",
+			expectError:   true,
+			errorContains: "MIN_PORT must be less than MAX_PORT",
+		},
+		{
+			name:          "Invalid min port format",
+			nodeIPs:       "127.0.0.1",
+			minPort:       "invalid",
+			maxPort:       "9000",
+			expectError:   true,
+			errorContains: "invalid MIN_PORT",
+		},
+		{
+			name:          "Invalid max port format",
+			nodeIPs:       "127.0.0.1",
+			minPort:       "8000",
+			maxPort:       "invalid",
+			expectError:   true,
+			errorContains: "invalid MAX_PORT",
+		},
+		{
+			name:          "Equal min and max ports",
+			nodeIPs:       "127.0.0.1",
+			minPort:       "8000",
+			maxPort:       "8000",
+			expectError:   true,
+			errorContains: "MIN_PORT must be less than MAX_PORT",
+		},
+		{
+			name:          "Valid configuration",
+			nodeIPs:       "127.0.0.1",
+			minPort:       "8000",
+			maxPort:       "8100",
+			expectError:   false,
+			errorContains: "",
+		},
+		{
+			name:          "Multiple node IPs",
+			nodeIPs:       "127.0.0.1,192.168.1.1",
+			minPort:       "8000",
+			maxPort:       "8100",
+			expectError:   false,
+			errorContains: "",
+		},
 	}
-	defer os.Remove("/tmp/key.pem")
 
-	if _, err := tmpKey.WriteString(validKeyPEM); err != nil {
-		t.Fatal(err)
-	}
-	tmpKey.Close()
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create temporary certificate files
+			certPath, keyPath := createTempCertFiles(t)
+			defer cleanupFiles(certPath, keyPath)
 
-	// Test validation through config package directly
-	_, err = config.LoadConfig()
-	if err == nil {
-		t.Error("Expected error with invalid port range, got nil")
-	} else {
-		t.Logf("Got expected error: %v", err)
+			// Set environment for this test case
+			os.Setenv("NODE_IPS", tc.nodeIPs)
+			os.Setenv("MIN_PORT", tc.minPort)
+			os.Setenv("MAX_PORT", tc.maxPort)
+			os.Setenv("CERT_FILE", certPath)
+			os.Setenv("KEY_FILE", keyPath)
+
+			// Try to load config
+			config, err := config.LoadConfig()
+
+			// Check results
+			if tc.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing %q, but got no error", tc.errorContains)
+				} else if tc.errorContains != "" && !strings.Contains(err.Error(), tc.errorContains) {
+					t.Errorf("Expected error containing %q, but got: %v", tc.errorContains, err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, but got: %v", err)
+				}
+
+				// Validate the config values when no error is expected
+				if config != nil {
+					// Check node IPs
+					expectedIPCount := 1
+					if strings.Contains(tc.nodeIPs, ",") {
+						expectedIPCount = len(strings.Split(tc.nodeIPs, ","))
+					}
+					if len(config.NodeIPs) != expectedIPCount {
+						t.Errorf("Expected %d node IPs, got %d", expectedIPCount, len(config.NodeIPs))
+					}
+
+					// Check min/max ports
+					expectedMinPort, _ := strconv.Atoi(tc.minPort)
+					if config.MinPort != expectedMinPort {
+						t.Errorf("Expected min port %d, got %d", expectedMinPort, config.MinPort)
+					}
+
+					expectedMaxPort, _ := strconv.Atoi(tc.maxPort)
+					if config.MaxPort != expectedMaxPort {
+						t.Errorf("Expected max port %d, got %d", expectedMaxPort, config.MaxPort)
+					}
+				} else {
+					t.Error("Expected config to be non-nil when no error is returned")
+				}
+			}
+		})
 	}
 }
