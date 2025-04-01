@@ -3,6 +3,8 @@ name: Build Binaries
 on:
   push:
     branches: [ master ]
+    tags:
+      - 'v*'
 
 jobs:
   build:
@@ -42,4 +44,33 @@ jobs:
       with:
         name: binaries
         path: |
-          ${{ steps.get-binary-name.outputs.binary_name }}-* 
+          ${{ steps.get-binary-name.outputs.binary_name }}-*
+
+  release:
+    needs: build
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: ./binaries
+
+      - name: Display structure of downloaded files
+        run: ls -R ./binaries
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: |
+            ./binaries/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true 
