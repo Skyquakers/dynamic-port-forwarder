@@ -22,6 +22,27 @@ The application is configured through environment variables:
 | `CERT_FILE` | Path to the SSL certificate file | (required) |
 | `KEY_FILE` | Path to the SSL private key file | (required) |
 
+## Docker
+
+### Building the Docker Image
+
+```bash
+docker build -t dynamic-port-forwarder .
+```
+
+You can specify build arguments to customize the default configuration:
+
+```bash
+docker build -t dynamic-port-forwarder \
+  --build-arg MIN_PORT=8000 \
+  --build-arg MAX_PORT=9000 \
+  --build-arg NODE_IPS="10.0.0.1,10.0.0.2" \
+  --build-arg VERSION="1.0.0" \
+  .
+```
+
+You can override these paths using the `CERT_FILE` and `KEY_FILE` environment variables.
+
 ## Building
 
 ```bash
