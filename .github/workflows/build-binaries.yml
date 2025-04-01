@@ -1,0 +1,45 @@
+name: Build Binaries
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    name: Build Binaries
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '^1.20'
+        cache: true
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Get binary name from go.mod
+      id: get-binary-name
+      run: |
+        BINARY_NAME=$(basename $(grep "module" go.mod | awk '{print $2}'))
+        echo "binary_name=$BINARY_NAME" >> $GITHUB_OUTPUT
+
+    - name: Build for x86-64
+      run: |
+        GOOS=linux GOARCH=amd64 go build -o ${{ steps.get-binary-name.outputs.binary_name }}-linux-amd64 ./cmd/...
+        GOOS=darwin GOARCH=amd64 go build -o ${{ steps.get-binary-name.outputs.binary_name }}-darwin-amd64 ./cmd/...
+        GOOS=windows GOARCH=amd64 go build -o ${{ steps.get-binary-name.outputs.binary_name }}-windows-amd64.exe ./cmd/...
+
+    - name: Build for arm64
+      run: |
+        GOOS=linux GOARCH=arm64 go build -o ${{ steps.get-binary-name.outputs.binary_name }}-linux-arm64 ./cmd/...
+        GOOS=darwin GOARCH=arm64 go build -o ${{ steps.get-binary-name.outputs.binary_name }}-darwin-arm64 ./cmd/...
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries
+        path: |
+          ${{ steps.get-binary-name.outputs.binary_name }}-* 
