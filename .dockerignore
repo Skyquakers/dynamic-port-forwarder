@@ -1,0 +1,8 @@
+.git/
+.github/
+.gitignore
+coverage.out
+README.md
+LICENSE
+Dockerfile
+.dockerignore 
