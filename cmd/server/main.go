@@ -14,8 +14,7 @@ import (
 
 // Variables that can be mocked for testing
 var (
-	osExit   = os.Exit
-	logFatal = log.Fatal
+	osExit = os.Exit
 )
 
 func main() {
