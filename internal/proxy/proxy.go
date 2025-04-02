@@ -12,25 +12,28 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
 
 // Proxy handles the SSL termination and forwarding
 type Proxy struct {
-	nodeIPs       []string
-	tlsConfig     *tls.Config
-	servers       map[int]*http.Server
-	serversLock   sync.Mutex
-	activeServers sync.WaitGroup
+	nodeIPs          []string
+	tlsConfig        *tls.Config
+	servers          map[int]*http.Server
+	serversLock      sync.Mutex
+	activeServers    sync.WaitGroup
+	currentNodeIndex uint64
 }
 
 // NewProxy creates a new proxy instance
 func NewProxy(nodeIPs []string, tlsConfig *tls.Config) *Proxy {
 	return &Proxy{
-		nodeIPs:   nodeIPs,
-		tlsConfig: tlsConfig,
-		servers:   make(map[int]*http.Server),
+		nodeIPs:          nodeIPs,
+		tlsConfig:        tlsConfig,
+		servers:          make(map[int]*http.Server),
+		currentNodeIndex: 0,
 	}
 }
 
@@ -135,14 +138,21 @@ func (p *Proxy) StopAll(ctx context.Context) {
 	log.Println("All server goroutines finished.")
 }
 
-// getNodeIP returns a node IP for load balancing (simple round-robin)
+// getNodeIP returns a node IP for load balancing (round-robin)
 func (p *Proxy) getNodeIP() string {
-	// Basic load balancing just returns the first node for simplicity
-	// In a real-world scenario, you'd want a more sophisticated approach
 	if len(p.nodeIPs) == 0 {
+		log.Println("Warning: No node IPs configured, defaulting to 127.0.0.1")
 		return "127.0.0.1"
 	}
-	return p.nodeIPs[0]
+
+	// Atomically increment the index and get the new value
+	idx := atomic.AddUint64(&p.currentNodeIndex, 1)
+
+	// Calculate the actual index using modulo
+	// (idx - 1) because AddUint64 returns the new value *after* adding 1
+	nodeIndex := int((idx - 1) % uint64(len(p.nodeIPs)))
+
+	return p.nodeIPs[nodeIndex]
 }
 
 // handleRequest handles incoming HTTP/WebSocket requests
