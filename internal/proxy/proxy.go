@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 
@@ -164,6 +165,19 @@ func (p *Proxy) handleHTTPRequest(w http.ResponseWriter, r *http.Request, target
 	// Create the reverse proxy
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
+	// Add an error handler for more detailed logging
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		log.Printf("Reverse proxy error: %v", err)
+		// Check if the error is specifically a connection reset
+		if ne, ok := err.(*net.OpError); ok {
+			if se, ok := ne.Err.(*os.SyscallError); ok {
+				// Check for specific errno, e.g., syscall.ECONNRESET on Linux/Darwin
+				log.Printf("Syscall error details: %v", se.Err)
+			}
+		}
+		http.Error(rw, "Proxy Error", http.StatusBadGateway)
+	}
+
 	// Update the request Host header to match the target host
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -172,6 +186,7 @@ func (p *Proxy) handleHTTPRequest(w http.ResponseWriter, r *http.Request, target
 	}
 
 	// Forward the request to the target
+	log.Printf("Forwarding HTTP request for %s to %s", r.URL.Path, targetURL)
 	proxy.ServeHTTP(w, r)
 }
 
