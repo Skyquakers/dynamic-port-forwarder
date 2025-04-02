@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -78,8 +79,8 @@ func (p *Proxy) StartServer(port int) error {
 	return nil
 }
 
-// StopServer stops the server running on the given port
-func (p *Proxy) StopServer(port int) error {
+// StopServer stops the server running on the given port gracefully
+func (p *Proxy) StopServer(ctx context.Context, port int) error {
 	p.serversLock.Lock()
 	server, exists := p.servers[port]
 	p.serversLock.Unlock()
@@ -88,25 +89,50 @@ func (p *Proxy) StopServer(port int) error {
 		return fmt.Errorf("no server running on port %d", port)
 	}
 
-	err := server.Close()
+	// Use Shutdown for graceful termination
+	err := server.Shutdown(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to stop server on port %d: %v", port, err)
+		return fmt.Errorf("failed to gracefully stop server on port %d: %v", port, err)
 	}
 
 	return nil
 }
 
-// StopAll stops all running servers
-func (p *Proxy) StopAll() {
+// StopAll stops all running servers gracefully
+func (p *Proxy) StopAll(ctx context.Context) {
 	p.serversLock.Lock()
+	serversToStop := make(map[int]*http.Server)
 	for port, server := range p.servers {
-		log.Printf("Stopping server on port %d", port)
-		server.Close()
+		serversToStop[port] = server
 	}
 	p.serversLock.Unlock()
 
-	// Wait for all servers to stop
+	var wg sync.WaitGroup
+	for port, server := range serversToStop {
+		wg.Add(1)
+		go func(port int, server *http.Server) {
+			defer wg.Done()
+			log.Printf("Attempting graceful shutdown for server on port %d...", port)
+			// Use Shutdown for graceful termination for each server
+			if err := server.Shutdown(ctx); err != nil {
+				log.Printf("Graceful shutdown error for server on port %d: %v. Forcing close.", port, err)
+				// Fallback to Close if Shutdown fails (e.g., context deadline exceeded)
+				if closeErr := server.Close(); closeErr != nil {
+					log.Printf("Error forcing close for server on port %d: %v", port, closeErr)
+				}
+			} else {
+				log.Printf("Gracefully shut down server on port %d", port)
+			}
+		}(port, server)
+	}
+
+	// Wait for all Shutdown calls to complete
+	wg.Wait()
+	log.Println("All server shutdown routines completed.")
+
+	// Wait for all server goroutines (from StartServer) to stop
 	p.activeServers.Wait()
+	log.Println("All server goroutines finished.")
 }
 
 // getNodeIP returns a node IP for load balancing (simple round-robin)

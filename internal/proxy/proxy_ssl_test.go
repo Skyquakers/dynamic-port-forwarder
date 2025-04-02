@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -59,7 +60,7 @@ func TestSSLTermination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start proxy server: %v", err)
 	}
-	defer p.StopAll()
+	defer p.StopAll(context.Background())
 
 	// Give the server time to start
 	time.Sleep(500 * time.Millisecond)

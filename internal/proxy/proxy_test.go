@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -148,7 +149,7 @@ func TestStartAndStopServer(t *testing.T) {
 	}
 
 	// Stop the server
-	err = p.StopServer(port)
+	err = p.StopServer(context.Background(), port)
 	if err != nil {
 		t.Fatalf("Failed to stop server: %v", err)
 	}
@@ -166,7 +167,7 @@ func TestStartAndStopServer(t *testing.T) {
 	}
 
 	// Try to stop non-existent server
-	err = p.StopServer(port)
+	err = p.StopServer(context.Background(), port)
 	if err == nil {
 		t.Error("Expected error when stopping non-existent server, got none")
 	}
@@ -194,7 +195,7 @@ func TestStopAll(t *testing.T) {
 	}
 
 	// Stop all servers
-	p.StopAll()
+	p.StopAll(context.Background())
 
 	// Wait a bit for servers to shut down
 	time.Sleep(100 * time.Millisecond)
