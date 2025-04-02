@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -59,14 +60,12 @@ func runServer() {
 	sig := <-sigCh
 	log.Printf("Received signal: %v, shutting down...", sig)
 
-	// Set timeout for graceful shutdown
-	time.AfterFunc(5*time.Second, func() {
-		log.Println("Shutdown timeout reached, forcing exit...")
-		osExit(1)
-	})
+	// Create a context with a timeout for graceful shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	// Stop all servers
-	p.StopAll()
+	// Stop all servers using the context
+	p.StopAll(shutdownCtx)
 
 	log.Println("Shutdown completed")
 }
