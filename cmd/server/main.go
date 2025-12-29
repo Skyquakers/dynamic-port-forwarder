@@ -41,6 +41,20 @@ func runServer() {
 		return
 	}
 
+	// Start hot-reload loop for certificates.
+	// This swaps the cert used for NEW TLS handshakes without restarting listeners.
+	// Existing connections keep using the cert they negotiated with.
+	reloadCtx, reloadCancel := context.WithCancel(context.Background())
+	certManager.StartAutoReload(reloadCtx, 30*time.Second, func(reloaded bool, err error) {
+		if err != nil {
+			log.Printf("TLS certificate reload failed (keeping previous): %v", err)
+			return
+		}
+		if reloaded {
+			log.Printf("TLS certificate reloaded")
+		}
+	})
+
 	// Create proxy
 	p := proxy.NewProxy(cfg.NodeIPs, tlsConfig)
 
@@ -52,17 +66,30 @@ func runServer() {
 		}
 	}
 
-	// Wait for interrupt signal
+	// Wait for signals (SIGHUP triggers immediate cert reload; SIGINT/SIGTERM exit)
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 
-	// Block until signal is received
-	sig := <-sigCh
-	log.Printf("Received signal: %v, shutting down...", sig)
+	for {
+		sig := <-sigCh
+		if sig == syscall.SIGHUP {
+			if err := certManager.LoadAndStore(); err != nil {
+				log.Printf("TLS certificate reload (SIGHUP) failed (keeping previous): %v", err)
+			} else {
+				log.Printf("TLS certificate reloaded (SIGHUP)")
+			}
+			continue
+		}
+		log.Printf("Received signal: %v, shutting down...", sig)
+		break
+	}
 
 	// Create a context with a timeout for graceful shutdown
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// Stop the hot-reload loop.
+	reloadCancel()
 
 	// Stop all servers using the context
 	p.StopAll(shutdownCtx)

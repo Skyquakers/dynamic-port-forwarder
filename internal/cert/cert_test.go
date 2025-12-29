@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"os"
 	"testing"
+	"time"
 )
 
 // Mock certificate and key content for testing
@@ -181,8 +182,16 @@ func TestGetTLSConfig(t *testing.T) {
 			t.Error("Expected TLS config, got nil")
 		}
 
-		if len(tlsConfig.Certificates) != 1 {
-			t.Errorf("Expected 1 certificate in TLS config, got %d", len(tlsConfig.Certificates))
+		if tlsConfig.GetCertificate == nil {
+			t.Fatalf("Expected GetCertificate to be set on TLS config")
+		}
+
+		gotCert, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{})
+		if err != nil {
+			t.Fatalf("Expected GetCertificate to succeed, got error: %v", err)
+		}
+		if gotCert == nil {
+			t.Fatalf("Expected GetCertificate to return a cert, got nil")
 		}
 
 		if tlsConfig.MinVersion != tls.VersionTLS12 {
@@ -203,4 +212,54 @@ func TestGetTLSConfig(t *testing.T) {
 			t.Error("Expected nil TLS config, got one")
 		}
 	})
+}
+
+func TestReloadIfChanged(t *testing.T) {
+	certPath, keyPath, cleanup := setupTestCerts(t, validCertPEM, validKeyPEM)
+	defer cleanup()
+
+	manager := NewManager(certPath, keyPath)
+	tlsConfig, err := manager.GetTLSConfig()
+	if err != nil {
+		t.Fatalf("GetTLSConfig failed: %v", err)
+	}
+
+	c1, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil || c1 == nil {
+		t.Fatalf("initial GetCertificate failed: %v (cert=%v)", err, c1)
+	}
+
+	// First reload check without changes should be a no-op.
+	reloaded, err := manager.ReloadIfChanged()
+	if err != nil {
+		t.Fatalf("ReloadIfChanged failed: %v", err)
+	}
+	if reloaded {
+		t.Fatalf("Expected no reload when files unchanged")
+	}
+
+	// Force mtime change to simulate certificate refresh.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(certPath, future, future); err != nil {
+		t.Fatalf("Failed to chtimes cert: %v", err)
+	}
+	if err := os.Chtimes(keyPath, future, future); err != nil {
+		t.Fatalf("Failed to chtimes key: %v", err)
+	}
+
+	reloaded, err = manager.ReloadIfChanged()
+	if err != nil {
+		t.Fatalf("ReloadIfChanged after change failed: %v", err)
+	}
+	if !reloaded {
+		t.Fatalf("Expected reload after mtime change")
+	}
+
+	c2, err := tlsConfig.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil || c2 == nil {
+		t.Fatalf("post-reload GetCertificate failed: %v (cert=%v)", err, c2)
+	}
+	if c1 == c2 {
+		t.Fatalf("Expected certificate pointer to change after reload")
+	}
 }
